@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personal Gemini Journal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col font-sans">
+
+    <nav class="border-b border-slate-800 bg-slate-950 p-4 shadow-md flex justify-between items-center">
+        <h1 class="text-xl font-bold tracking-tight text-indigo-400">🛡️ Personal Gemini Journal</h1>
+        <div id="auth-status" class="flex items-center gap-4">
+            <button id="btn-login" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium shadow transition-all duration-200">
+                Sign in with Google
+            </button>
+            <div id="user-profile" class="hidden flex items-center gap-3">
+                <span id="user-display-name" class="text-sm font-medium text-slate-300"></span>
+                <button id="btn-logout" class="border border-slate-700 hover:bg-slate-800 text-slate-300 px-3 py-1.5 rounded-lg text-sm transition-all duration-200">
+                    Sign Out
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="flex-1 max-w-4xl w-full mx-auto p-4 md:p-6 flex flex-col gap-6">
+
+        <div id="view-logged-out" class="flex-1 flex flex-col items-center justify-center text-center py-20 bg-slate-950/40 border border-slate-800/60 rounded-2xl px-6">
+            <h2 class="text-2xl font-semibold mb-2">Secure AI Workspace</h2>
+            <p class="text-slate-400 max-w-md mb-6">
+                An isolated cryptographic journal workspace powered by Gemini. Authenticate securely to open your portal.
+            </p>
+            <button onclick="document.getElementById('btn-login').click()" class="bg-slate-800 hover:bg-slate-700 text-indigo-300 px-6 py-3 rounded-xl border border-slate-700 font-medium transition-all duration-200">
+                Access Isolated Environment
+            </button>
+        </div>
+
+        <div id="view-logged-in" class="hidden flex-1 flex flex-col gap-6">
+
+            <div class="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl">
+                <label for="journal-input" class="block text-sm font-semibold text-indigo-400 tracking-wide uppercase mb-3">
+                    Brainstorm or Record Your Thoughts
+                </label>
+                <textarea id="journal-input" rows="4"
+                    class="w-full bg-slate-900 border border-slate-800 rounded-xl p-4 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                    placeholder="What are you working on today? Tell Gemini..."></textarea>
+
+                <div class="flex justify-end mt-4">
+                    <button id="btn-submit-journal" class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-5 py-2.5 rounded-xl shadow-lg transition-all duration-200 flex items-center gap-2">
+                        Transmit to Gemini
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex-1 flex flex-col bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl">
+                <h3 class="text-md font-semibold text-slate-300 tracking-wide mb-4 flex items-center gap-2">
+                    <span>📋</span> Isolated Journal Stream
+                </h3>
+                <div id="journal-stream" class="flex-1 space-y-4 max-h-[400px] overflow-y-auto pr-2 text-slate-400 text-sm">
+                    <div id="empty-stream-message" class="text-center py-10 text-slate-500 italic">
+                        No active records in this session. Write an entry above to sync data.
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+        const firebaseConfig = {
+            apiKey: "AIzaSyBsKU-4Ll2Ljqhz9MDPMlRJoepU4Orb8EI",
+            authDomain: "personal-gemini-journal-f790a.firebaseapp.com",
+            projectId: "personal-gemini-journal-f790a",
+            storageBucket: "personal-gemini-journal-f790a.firebasestorage.app",
+            messagingSenderId: "931033287675",
+            appId: "1:931033287675:web:a9f5176cf6f2f0c62ed95e",
+            measurementId: "G-MPR9L2HJBQ"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const provider = new GoogleAuthProvider();
+
+        const btnLogin = document.getElementById('btn-login');
+        const btnLogout = document.getElementById('btn-logout');
+        const btnSubmitJournal = document.getElementById('btn-submit-journal');
+        const viewLoggedOut = document.getElementById('view-logged-out');
+        const viewLoggedIn = document.getElementById('view-logged-in');
+        const userProfile = document.getElementById('user-profile');
+        const userDisplayName = document.getElementById('user-display-name');
+        const journalInput = document.getElementById('journal-input');
+        const journalStream = document.getElementById('journal-stream');
+        const emptyStreamMessage = document.getElementById('empty-stream-message');
+
+        let currentUserToken = null;
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUserToken = await user.getIdToken(true);
+
+                viewLoggedOut.classList.add('hidden');
+                btnLogin.classList.add('hidden');
+                viewLoggedIn.classList.remove('hidden');
+                userProfile.classList.remove('hidden');
+                userDisplayName.textContent = user.displayName || user.email;
+            } else {
+                currentUserToken = null;
+                viewLoggedIn.classList.add('hidden');
+                userProfile.classList.add('hidden');
+                viewLoggedOut.classList.remove('hidden');
+                btnLogin.classList.remove('hidden');
+            }
+        });
+
+        btnLogin.addEventListener('click', async () => {
+            try {
+                await signInWithPopup(auth, provider);
+            } catch (err) {
+                alert("Authorization intercept: " + err.message);
+            }
+        });
+
+        btnLogout.addEventListener('click', () => signOut(auth));
+
+        btnSubmitJournal.addEventListener('click', async () => {
+            const promptText = journalInput.value.trim();
+            if (!promptText) return;
+
+            btnSubmitJournal.disabled = true;
+            btnSubmitJournal.textContent = "Processing & Encrypting...";
+
+            try {
+                const response = await fetch('http://localhost:5000/api/journal', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentUserToken}`
+                    },
+                    body: JSON.stringify({ message: promptText })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || "Transmission block event");
+                }
+
+                if (emptyStreamMessage) emptyStreamMessage.remove();
+
+                const entryHtml = `
+                    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2 mb-3">
+                        <div class="text-xs text-indigo-400 font-semibold tracking-wider uppercase">User Prompt</div>
+                        <div class="text-slate-200 mb-2">${promptText}</div>
+                        <div class="text-xs text-emerald-400 font-semibold tracking-wider uppercase border-t border-slate-800 pt-2">Gemini Analysis</div>
+                        <div class="text-slate-300 font-medium">${data.reply}</div>
+                    </div>
+                `;
+                journalStream.insertAdjacentHTML('afterbegin', entryHtml);
+                journalInput.value = "";
+
+            } catch (err) {
+                console.error(err);
+                alert("Security pipeline alert: " + err.message);
+            } finally {
+                btnSubmitJournal.disabled = false;
+                btnSubmitJournal.textContent = "Transmit to Gemini";
+            }
+        });
+    </script>
+</body>
+</html>
