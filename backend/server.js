@@ -10,6 +10,8 @@ const app = express();
 
 // Rule 5: Least privilege CORS policy
 const ALLOWED_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:3000';
+
+// 1. Update CORS configuration to allow DELETE
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || origin === ALLOWED_ORIGIN) {
@@ -18,9 +20,15 @@ app.use(cors({
       callback(new Error('Blocked by CORS policy'));
     }
   },
-  methods: ['POST', 'GET'],
+  methods: ['POST', 'GET', 'DELETE'], // Added DELETE to least-privilege method allowlist
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// 2. Add Authenticated DELETE /api/journal/:entryId Endpoint
+
+// Rule 4: Strict alphanumeric Firestore document ID validation pattern
+const FIRESTORE_DOC_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
 
 // Rule 4: Limit JSON body size to prevent payload exhaustion attacks
 app.use(express.json({ limit: '16kb' }));
@@ -249,6 +257,53 @@ app.get('/api/journal', verifyAuthToken, async (req, res, next) => {
     });
 
   } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/journal/:entryId
+ * Cryptographically verifies token and removes the record strictly from
+ * the user's isolated subcollection: /users/{uid}/entries/{entryId}.
+ */
+
+app.delete('/api/journal/:entryId', verifyAuthToken, async (req, res, next) => {
+  try {
+    const uid = req.uid;
+    const { entryId } = req.params;
+
+    // Rule 4: Defensive input validation on route parameters to prevent path traversal
+    if (!entryId || typeof entryId !== 'string' || !FIRESTORE_DOC_ID_REGEX.test(entryId.trim())) {
+      return res.status(400).json({ error: "Bad Request: Invalid document identifier format" });
+    }
+
+    const sanitizedEntryId = entryId.trim();
+
+    // Rule 2: Multi-tenant isolated storage path binding
+    const docRef = db
+      .collection('users')
+      .doc(uid)
+      .collection('entries')
+      .doc(sanitizedEntryId);
+
+    // Verify existence prior to deletion to prevent silent misdirection
+    const docSnapshot = await docRef.get();
+    if (!docSnapshot.exists) {
+      return res.status(404).json({ error: "Resource Not Found: Entry does not exist or was already removed" });
+    }
+
+    // Execute permanent deletion from Firestore
+    await docRef.delete();
+
+    // Return opaque, sanitized success confirmation
+    return res.status(200).json({
+      success: true,
+      deletedEntryId: sanitizedEntryId,
+      message: "Entry successfully deleted"
+    });
+
+  } catch (error) {
+    // Rule 7: Pass to global error middleware without leaking Firestore internals
     next(error);
   }
 });

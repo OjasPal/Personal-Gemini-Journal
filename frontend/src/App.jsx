@@ -242,8 +242,10 @@ export default function App() {
             </span>
           </div>
 
+          {/* Connected setEntries prop for real-time deletion synchronization */}
           <JournalStream
             entries={entries}
+            setEntries={setEntries}
             isLoading={loadingEntries}
             error={streamError}
             onRetry={fetchEntries}
