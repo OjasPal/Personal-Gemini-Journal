@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Search, Sparkles, X, Database, AlertCircle, Send, Loader2, RefreshCw } from 'lucide-react';
 import { auth } from '../firebase';
 
-const API_BASE_URL = 'http://localhost:5000';
+const API_BASE_URL = 'https://journal-backend-931033287675.us-central1.run.app';
 const QUICK_QUESTIONS = [
   "What game did I ask you about before?",
   "What have I been working on recently?",

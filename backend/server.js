@@ -23,7 +23,7 @@ const corsOptions = {
       callback(new Error('Blocked by CORS policy'));
     }
   },
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 };
@@ -165,8 +165,6 @@ async function verifyAuthToken(req, res, next) {
 // ==========================================
 const PRIMARY_MODEL = "gemini-3.6-flash";
 const FALLBACK_MODEL = "gemini-3.5-flash-lite";
-
-// Dual embedding model candidates to handle v1beta differences
 const EMBEDDING_MODELS = ["text-embedding-004", "embedding-001"];
 
 function isTransientError(error) {
@@ -272,12 +270,8 @@ function buildCompositeMemoryText(userPrompt, aiSummary) {
   return cleanPrompt;
 }
 
-/**
- * Robust embedding generator with model fallback
- */
 async function generateEmbeddingSafe(apiKey, text) {
   const genAI = new GoogleGenerativeAI(apiKey);
-
   for (const modelName of EMBEDDING_MODELS) {
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
@@ -286,44 +280,27 @@ async function generateEmbeddingSafe(apiKey, text) {
         return result.embedding.values;
       }
     } catch (err) {
-      safeLog('warn', {
-        action: 'EmbeddingAttemptFailed',
-        modelAttempted: modelName,
-        errorMessage: err.message
-      });
-      // Continue to next candidate model
+      safeLog('warn', { action: 'EmbeddingAttemptFailed', modelAttempted: modelName, errorMessage: err.message });
     }
   }
-
   return null;
 }
 
-/**
- * High-precision lexical relevance scorer (Used as fallback or booster)
- */
 const STOP_WORDS = new Set(['what', 'which', 'game', 'i', 'you', 'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'about', 'before', 'my', 'me', 'is', 'was', 'did', 'do', 'have', 'had']);
 
 function calculateLexicalScore(queryText, memoryText) {
   if (!queryText || !memoryText) return 0;
   const qTokens = queryText.toLowerCase().split(/\W+/).filter(w => w.length > 2 && !STOP_WORDS.has(w));
   const mLower = memoryText.toLowerCase();
-
   if (qTokens.length === 0) return 0;
 
   let matches = 0;
   for (const token of qTokens) {
-    if (mLower.includes(token)) {
-      matches += 1;
-    }
+    if (mLower.includes(token)) matches += 1;
   }
   return matches / qTokens.length;
 }
 
-/**
- * Hybrid Memory Retriever:
- * Evaluates vector cosine similarity AND lexical word overlap.
- * Guaranteed to return matching memories even if embedding API returns 404!
- */
 async function retrieveRelevantMemories(uid, queryText, queryEmbedding, limit = TOP_K_MEMORIES) {
   try {
     const memoriesSnapshot = await db
@@ -337,7 +314,6 @@ async function retrieveRelevantMemories(uid, queryText, queryEmbedding, limit = 
     if (memoriesSnapshot.empty) return [];
 
     const scored = [];
-
     memoriesSnapshot.docs.forEach((doc) => {
       const data = doc.data();
       const content = sanitizeTextSnippet(data.content, MAX_MEMORY_CHARS);
@@ -346,10 +322,7 @@ async function retrieveRelevantMemories(uid, queryText, queryEmbedding, limit = 
       if (queryEmbedding && Array.isArray(data.embedding)) {
         vectorSim = cosineSimilarity(queryEmbedding, data.embedding);
       }
-
       const lexicalSim = calculateLexicalScore(queryText, content);
-
-      // Blended score: Vector takes precedence if available, with lexical boost
       const finalScore = vectorSim > 0 ? (vectorSim * 0.7 + lexicalSim * 0.3) : lexicalSim;
 
       if (finalScore >= 0.25 || vectorSim >= SIMILARITY_THRESHOLD) {
@@ -376,14 +349,12 @@ function buildContextualJournalPrompt(currentPrompt, recentHistory, relevantMemo
     ? recentHistory
         .slice()
         .reverse()
-        .map((entry, idx) => {
-          return (
-            `  <past_entry index="${idx + 1}">\n` +
-            `    <user>${entry.userPrompt}</user>\n` +
-            `    <assistant>${entry.aiSummary}</assistant>\n` +
-            `  </past_entry>`
-          );
-        })
+        .map((entry, idx) => (
+          `  <past_entry index="${idx + 1}">\n` +
+          `    <user>${entry.userPrompt}</user>\n` +
+          `    <assistant>${entry.aiSummary}</assistant>\n` +
+          `  </past_entry>`
+        ))
         .join('\n')
     : '  <none>No immediate recent entries</none>';
 
@@ -512,7 +483,7 @@ app.post('/api/journal', verifyAuthToken, async (req, res, next) => {
       .collection('entries')
       .add(entryData);
 
-    // 5. Persist Extracted Memory (Stores content and embedding if available)
+    // 5. Persist Extracted Memory
     const memoryContent = buildCompositeMemoryText(trimmedMessage, aiResponseText);
     db.collection('users')
       .doc(uid)
@@ -531,6 +502,252 @@ app.post('/api/journal', verifyAuthToken, async (req, res, next) => {
       reply: aiResponseText,
       modelUsed: usedModel,
       memoriesReferenced: relevantMemories.length
+    });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/journal/:entryId
+ * Feature 1: Edit user prompt and regenerate Gemini response with continuity
+ */
+app.put('/api/journal/:entryId', verifyAuthToken, async (req, res, next) => {
+  try {
+    const uid = req.uid;
+    const { entryId } = req.params;
+
+    if (!entryId || typeof entryId !== 'string' || !FIRESTORE_DOC_ID_REGEX.test(entryId.trim())) {
+      return res.status(400).json({ error: "Bad Request: Invalid document identifier format" });
+    }
+
+    const sanitizedEntryId = entryId.trim();
+
+    if (!checkRateLimit(uid)) {
+      safeLog('warn', { action: 'RateLimitExceeded', endpoint: '/api/journal/:entryId', userHash: req.userHash });
+      return res.status(429).json({ error: "Gemini is receiving too many requests. Please wait a moment before editing again." });
+    }
+
+    const { message } = req.body;
+    if (typeof message !== 'string') {
+      return res.status(400).json({ error: "Bad Request: Invalid message format" });
+    }
+
+    const trimmedMessage = message.trim();
+    if (trimmedMessage.length === 0) {
+      return res.status(400).json({ error: "Bad Request: Message cannot be empty" });
+    }
+
+    if (trimmedMessage.length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({
+        error: `Bad Request: Message exceeds maximum length of ${MAX_MESSAGE_LENGTH} characters`
+      });
+    }
+
+    const docRef = db.collection('users').doc(uid).collection('entries').doc(sanitizedEntryId);
+    const docSnapshot = await docRef.get();
+
+    if (!docSnapshot.exists) {
+      return res.status(404).json({ error: "Resource Not Found: Entry does not exist" });
+    }
+
+    const apiKey = await getGeminiApiKey();
+    if (!apiKey) {
+      return res.status(500).json({ error: "Server Configuration Error: AI service currently unavailable." });
+    }
+
+    // 1. Fetch Latest-3 Chronological Entries excluding current entry
+    let recentHistory = [];
+    try {
+      const historySnapshot = await db
+        .collection('users')
+        .doc(uid)
+        .collection('entries')
+        .orderBy('createdAt', 'desc')
+        .limit(MAX_HISTORY_COUNT + 1)
+        .get();
+
+      recentHistory = historySnapshot.docs
+        .filter((d) => d.id !== sanitizedEntryId)
+        .slice(0, MAX_HISTORY_COUNT)
+        .map((d) => {
+          const data = d.data();
+          return {
+            userPrompt: sanitizeTextSnippet(data?.userPrompt || '', MAX_HISTORY_ENTRY_CHARS),
+            aiSummary: sanitizeTextSnippet(data?.aiSummary || '', MAX_HISTORY_ENTRY_CHARS)
+          };
+        })
+        .filter((item) => item.userPrompt.length > 0);
+    } catch (historyErr) {
+      recentHistory = [];
+    }
+
+    // 2. Embedding & Memories
+    let currentEmbedding = null;
+    let relevantMemories = [];
+    try {
+      currentEmbedding = await generateEmbeddingSafe(apiKey, trimmedMessage);
+      relevantMemories = await retrieveRelevantMemories(uid, trimmedMessage, currentEmbedding, TOP_K_MEMORIES);
+    } catch {
+      relevantMemories = [];
+    }
+
+    // 3. Invoke Gemini
+    const compositePrompt = buildContextualJournalPrompt(trimmedMessage, recentHistory, relevantMemories);
+    let aiResponseText = "";
+    let usedModel = PRIMARY_MODEL;
+
+    try {
+      const geminiResult = await executeGeminiWithRetryAndFallback(apiKey, compositePrompt, { userHash: req.userHash });
+      aiResponseText = geminiResult.text;
+      usedModel = geminiResult.modelUsed;
+    } catch (aiErr) {
+      return res.status(503).json({ error: "Gemini is temporarily busy. Please try again in a moment." });
+    }
+
+    const editedAt = new Date().toISOString();
+    await docRef.update({
+      userPrompt: trimmedMessage,
+      aiSummary: aiResponseText,
+      editedAt
+    });
+
+    // Update memory document if present
+    const memoryQuery = await db.collection('users').doc(uid).collection('memories').where('sourceEntryId', '==', sanitizedEntryId).get();
+    const updatedMemoryContent = buildCompositeMemoryText(trimmedMessage, aiResponseText);
+    const batch = db.batch();
+    memoryQuery.docs.forEach((d) => {
+      batch.update(d.ref, {
+        content: sanitizeTextSnippet(updatedMemoryContent, MAX_MEMORY_CHARS),
+        embedding: currentEmbedding || [],
+        updatedAt: editedAt
+      });
+    });
+    await batch.commit().catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      entryId: sanitizedEntryId,
+      userPrompt: trimmedMessage,
+      aiSummary: aiResponseText,
+      editedAt,
+      modelUsed: usedModel
+    });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/journal/export
+ * Feature 2: Full un-capped export of all user journal entries
+ */
+app.get('/api/journal/export', verifyAuthToken, async (req, res, next) => {
+  try {
+    const uid = req.uid;
+
+    const snapshot = await db
+      .collection('users')
+      .doc(uid)
+      .collection('entries')
+      .orderBy('createdAt', 'asc') // Chronological order for natural journal reading
+      .get();
+
+    const entries = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        userPrompt: typeof data.userPrompt === 'string' ? data.userPrompt : '',
+        aiSummary: typeof data.aiSummary === 'string' ? data.aiSummary : '',
+        createdAt: data.createdAt || null,
+        editedAt: data.editedAt || null
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: entries.length,
+      exportTimestamp: new Date().toISOString(),
+      entries
+    });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/journal/memories
+ * Feature 3: Lists semantic memories indexed for the user
+ */
+app.get('/api/journal/memories', verifyAuthToken, async (req, res, next) => {
+  try {
+    const uid = req.uid;
+
+    const snapshot = await db
+      .collection('users')
+      .doc(uid)
+      .collection('memories')
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+
+    const memories = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        content: data.content || '',
+        sourceEntryId: data.sourceEntryId || null,
+        createdAt: data.createdAt || null,
+        hasVector: Array.isArray(data.embedding) && data.embedding.length > 0
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: memories.length,
+      memories
+    });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/journal/all
+ * Feature 3: Privacy view complete data wipe
+ */
+app.delete('/api/journal/all', verifyAuthToken, async (req, res, next) => {
+  try {
+    const uid = req.uid;
+
+    // 1. Delete all entries
+    const entriesSnapshot = await db.collection('users').doc(uid).collection('entries').get();
+    const batch1 = db.batch();
+    entriesSnapshot.docs.forEach((doc) => batch1.delete(doc.ref));
+    await batch1.commit();
+
+    // 2. Delete all memories
+    const memoriesSnapshot = await db.collection('users').doc(uid).collection('memories').get();
+    const batch2 = db.batch();
+    memoriesSnapshot.docs.forEach((doc) => batch2.delete(doc.ref));
+    await batch2.commit();
+
+    safeLog('info', {
+      action: 'DeleteAllUserDataCompleted',
+      userHash: req.userHash,
+      entriesDeleted: entriesSnapshot.size,
+      memoriesDeleted: memoriesSnapshot.size
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "All personal journal entries and memory vectors have been permanently wiped.",
+      entriesDeleted: entriesSnapshot.size,
+      memoriesDeleted: memoriesSnapshot.size
     });
 
   } catch (error) {
@@ -623,14 +840,6 @@ app.post('/api/journal/backfill-memories', verifyAuthToken, async (req, res, nex
       backfilledCount++;
     }
 
-    safeLog('info', {
-      action: 'BackfillCompleted',
-      userHash: req.userHash,
-      scanned: entriesSnapshot.size,
-      backfilled: backfilledCount,
-      skipped: skippedCount
-    });
-
     return res.status(200).json({
       success: true,
       message: `Backfill complete. Indexed ${backfilledCount} entries into semantic memories.`,
@@ -675,7 +884,6 @@ app.post('/api/journal/ask', verifyAuthToken, async (req, res, next) => {
       return res.status(500).json({ error: "Server Configuration Error: AI service currently unavailable." });
     }
 
-    // Hybrid Semantic + Lexical Matcher
     const queryEmbedding = await generateEmbeddingSafe(apiKey, trimmedQuestion);
     const matchedMemories = await retrieveRelevantMemories(uid, trimmedQuestion, queryEmbedding, TOP_K_MEMORIES);
 
@@ -752,7 +960,8 @@ app.get('/api/journal', verifyAuthToken, async (req, res, next) => {
         id: doc.id,
         userPrompt: typeof data.userPrompt === 'string' ? data.userPrompt : '',
         aiSummary: typeof data.aiSummary === 'string' ? data.aiSummary : '',
-        createdAt: data.createdAt || null
+        createdAt: data.createdAt || null,
+        editedAt: data.editedAt || null
       };
     });
 

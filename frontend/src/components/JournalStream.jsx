@@ -5,30 +5,24 @@ import { SkeletonCard } from './SkeletonCard';
 import { Inbox, ShieldAlert } from 'lucide-react';
 import { auth } from '../firebase';
 
-const API_BASE_URL = 'http://localhost:5000';
+const API_BASE_URL = 'https://journal-backend-931033287675.us-central1.run.app';
 
 export const JournalStream = ({ entries, setEntries, isLoading, error, onRetry }) => {
-  const [deleteError, setDeleteError] = useState(null);
+  const [streamActionError, setStreamActionError] = useState(null);
 
   /**
-   * Rule 1: Acquires verified ID token and executes DELETE /api/journal/:entryId
+   * Rule 1: Authenticated DELETE /api/journal/:entryId
    */
   const handleDeleteEntry = async (entryId) => {
-    setDeleteError(null);
+    setStreamActionError(null);
 
     try {
-      if (!auth.currentUser) {
-        throw new Error("Unauthorized: Active session required.");
-      }
-
-      // Force cryptographic token refresh to verify active identity
+      if (!auth.currentUser) throw new Error("Unauthorized: Active session required.");
       const token = await auth.currentUser.getIdToken(true);
 
       const response = await fetch(`${API_BASE_URL}/api/journal/${encodeURIComponent(entryId)}`, {
         method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+        headers: { 'Authorization': `Bearer ${token}` }
       });
 
       if (!response.ok) {
@@ -36,12 +30,56 @@ export const JournalStream = ({ entries, setEntries, isLoading, error, onRetry }
         throw new Error(errData.error || `Server rejected deletion (${response.status})`);
       }
 
-      // Optimistically/immediately filter local React state
-      setEntries((prevEntries) => prevEntries.filter((item) => item.id !== entryId));
-
+      setEntries((prev) => prev.filter((item) => item.id !== entryId));
     } catch (err) {
       console.error("Deletion failure:", err.message);
-      setDeleteError(err.message || "Failed to remove entry.");
+      setStreamActionError(err.message || "Failed to remove entry.");
+      throw err;
+    }
+  };
+
+  /**
+   * Rule 1: Authenticated PUT /api/journal/:entryId
+   */
+  const handleEditEntry = async (entryId, newPrompt) => {
+    setStreamActionError(null);
+
+    try {
+      if (!auth.currentUser) throw new Error("Unauthorized: Active session required.");
+      const token = await auth.currentUser.getIdToken(true);
+
+      const response = await fetch(`${API_BASE_URL}/api/journal/${encodeURIComponent(entryId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ message: newPrompt })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `Server rejected edit (${response.status})`);
+      }
+
+      const updated = await response.json();
+
+      // Update item in local state immediately
+      setEntries((prev) =>
+        prev.map((item) =>
+          item.id === entryId
+            ? {
+                ...item,
+                userPrompt: updated.userPrompt,
+                aiSummary: updated.aiSummary,
+                editedAt: updated.editedAt
+              }
+            : item
+        )
+      );
+    } catch (err) {
+      console.error("Edit failure:", err.message);
+      setStreamActionError(err.message || "Failed to update entry.");
       throw err;
     }
   };
@@ -82,18 +120,17 @@ export const JournalStream = ({ entries, setEntries, isLoading, error, onRetry }
 
   return (
     <div className="space-y-3">
-      {/* Dynamic inline notification for failed deletions */}
       <AnimatePresence>
-        {deleteError && (
+        {streamActionError && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             className="p-3 mb-3 rounded-xl bg-red-500/10 border border-red-500/20 text-xs font-mono text-red-400 flex items-center justify-between"
           >
-            <span>{deleteError}</span>
+            <span>{streamActionError}</span>
             <button
-              onClick={() => setDeleteError(null)}
+              onClick={() => setStreamActionError(null)}
               className="text-slate-400 hover:text-white"
             >
               Dismiss
@@ -125,6 +162,7 @@ export const JournalStream = ({ entries, setEntries, isLoading, error, onRetry }
               key={entry.id}
               entry={entry}
               onDelete={handleDeleteEntry}
+              onEdit={handleEditEntry}
             />
           ))}
         </AnimatePresence>
