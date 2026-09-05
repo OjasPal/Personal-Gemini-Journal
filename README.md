@@ -138,9 +138,13 @@ A full Vite + React + Tailwind + Framer Motion rebuild replacing the original si
 ## Tech Stack
 
 **Frontend:** React, Vite, Tailwind CSS, Framer Motion, `marked` + `DOMPurify`, Firebase Auth SDK
+
 **Backend:** Node.js, Express, Firebase Admin SDK, `@google/generative-ai`
+
 **Cloud Infrastructure:** Google Cloud Run (both frontend and backend), Cloud Firestore, Google Cloud Secret Manager, Firebase Authentication, IAM
+
 **AI:** Gemini API (`gemini-3.6-flash` with fallback), Gemini embeddings for semantic memory search
+
 **Configured via:** Google AI Studio (custom security instructions + code generation)
 
 ---
